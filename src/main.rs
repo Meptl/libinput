@@ -1,13 +1,14 @@
-extern crate libinput_sys;
-extern crate libc;
-
-mod ffi;
-use ffi::LibInput;
+extern crate libinput;
 
 fn main() {
-    let mut input = LibInput::new_from_udev().unwrap();
+    println!("Starting.");
+    let mut input = libinput::LibInput::new_from_udev().unwrap();
     while input.poll().is_none() {
         let mut event = input.get_event();
+        println!("Got event.");
+        if event.is_none() {
+            println!("None.");
+        }
         while event.is_some() {
             let e = event.unwrap();
             e.print_header();
@@ -15,4 +16,5 @@ fn main() {
             event = input.get_event();
         }
     }
+    println!("Done.");
 }
