@@ -11,6 +11,9 @@ use ::std::os::raw::{c_char, c_int, c_void};
 use ::std::ffi::CString;
 use ::std::fs::File;
 
+const screen_width: u32 = 100;
+const screen_height: u32 = 100;
+
 unsafe extern "C" fn open_restricted(path: *const c_char, flags: c_int, user_data: *mut c_void) -> c_int {
     // We avoid creating a Rust File because that requires abiding by Rust lifetimes.
     let fd = unsafe { ::libc::open(path, flags) };
@@ -24,6 +27,11 @@ unsafe extern "C" fn close_restricted(fd: c_int, user_data: *mut c_void) {
     let f = unsafe { File::from_raw_fd(fd) };
     // File is closed when dropped.
 }
+
+static interface: libinput_interface = libinput_interface {
+    open_restricted: Some(open_restricted),
+    close_restricted: Some(close_restricted),
+};
 
 fn default_options() -> tools_context {
     let seat_cstr = CString::new("seat0").unwrap();
@@ -57,16 +65,10 @@ fn default_options() -> tools_context {
 
 pub struct LibInput {
     lib_handle: *mut libinput,
-    interface: libinput_interface,
 }
 
 impl LibInput {
     pub fn new_from_udev() -> Result<LibInput, &'static str> {
-        let mut interface = libinput_interface {
-            open_restricted: Some(open_restricted),
-            close_restricted: Some(close_restricted),
-        };
-
         let udev = unsafe { udev_new() };
 
         if udev.is_null() {
@@ -76,7 +78,7 @@ impl LibInput {
         let mut tools_context = default_options();
 
         let lib_handle = unsafe {
-            libinput_udev_create_context(((&mut interface) as *mut _),
+            libinput_udev_create_context(((&interface) as *const _),
             (((&mut tools_context) as *mut tools_context) as *mut _), udev)
         };
 
@@ -92,36 +94,62 @@ impl LibInput {
 
         unsafe { udev_unref(udev) };
 
-        Ok(LibInput {
-            lib_handle: lib_handle,
-            interface: interface,
-        })
+        Ok(LibInput { lib_handle: lib_handle })
     }
 
     pub fn events(&mut self) -> EventIterator {
         EventIterator::new(self)
     }
 
-    /// Helper functions for creating Events
-    fn create_keyboard_event(event_handle: *mut libinput_event) -> Event {
-        // This function is simply a type  cast in C
+    fn key_event(event_handle: *mut libinput_event) -> Event {
         let key_event = unsafe { libinput_event_get_keyboard_event(event_handle) };
-	    let key_state = unsafe { libinput_event_keyboard_get_key_state(key_event) };
-	    let key = unsafe { libinput_event_keyboard_get_key(key_event) };
-
-        let state = match key_state {
-            libinput_key_state::LIBINPUT_KEY_STATE_PRESSED => events::State::Pressed,
-            libinput_key_state::LIBINPUT_KEY_STATE_RELEASED => events::State::Released,
+        let key = unsafe { libinput_event_keyboard_get_key(key_event) };
+        let key_state = {
+            let k = unsafe { libinput_event_keyboard_get_key_state(key_event) };
+            match k {
+                libinput_key_state::LIBINPUT_KEY_STATE_PRESSED => events::State::Pressed,
+                libinput_key_state::LIBINPUT_KEY_STATE_RELEASED => events::State::Released,
+            }
         };
 
-        Event::KeyboardInput(state, key)
+        Event::KeyboardInput(key_state, key)
+    }
+
+    fn mouse_event(event_handle: *mut libinput_event) -> Event {
+        let mouse_event = unsafe { libinput_event_get_pointer_event(event_handle) };
+        let x = unsafe { libinput_event_pointer_get_dx(mouse_event) };
+        let y = unsafe { libinput_event_pointer_get_dy(mouse_event) };
+        Event::MouseMove(x, y)
+    }
+
+    fn mouse_event_abs(event_handle: *mut libinput_event) -> Event {
+        let mouse_event = unsafe { libinput_event_get_pointer_event(event_handle) };
+        let x = unsafe { libinput_event_pointer_get_absolute_x_transformed(
+                            mouse_event, screen_width) };
+        let y = unsafe { libinput_event_pointer_get_absolute_y_transformed(
+                            mouse_event, screen_height) };
+        Event::MouseMoveAbsolute(x, y)
+    }
+
+    fn mouse_button_event(event_handle: *mut libinput_event) -> Event {
+        let mouse_event = unsafe { libinput_event_get_pointer_event(event_handle) };
+        let button = unsafe { libinput_event_pointer_get_button(mouse_event) };
+        let button_state = {
+            let b = unsafe { libinput_event_pointer_get_button_state(mouse_event) };
+            match b {
+                libinput_button_state::LIBINPUT_BUTTON_STATE_PRESSED => events::State::Pressed,
+                libinput_button_state::LIBINPUT_BUTTON_STATE_RELEASED => events::State::Released,
+            }
+        };
+
+        Event::MouseButton(button_state, button)
     }
 }
 
 impl Drop for LibInput {
     fn drop(&mut self) {
         // Return value ignored here.
-        // This segfaults after polling for events.
+        // This segfaults after calling any Rust function on LibInput.
         unsafe { libinput_unref(self.lib_handle); }
     }
 }
@@ -162,14 +190,19 @@ impl<'a> EventIterator<'a> {
                 Event::DeviceRemove(Device::from(event_handle))
             },
             libinput_event_type::LIBINPUT_EVENT_KEYBOARD_KEY => {
-                LibInput::create_keyboard_event(event_handle)
+                LibInput::key_event(event_handle)
             },
-            libinput_event_type::LIBINPUT_EVENT_POINTER_MOTION => { Event::None },
-            libinput_event_type::LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => { Event::None },
-            libinput_event_type::LIBINPUT_EVENT_POINTER_BUTTON => { Event::None },
-            libinput_event_type::LIBINPUT_EVENT_POINTER_AXIS => { Event::None },
+            libinput_event_type::LIBINPUT_EVENT_POINTER_MOTION => {
+                LibInput::mouse_event(event_handle)
+            },
+            libinput_event_type::LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => {
+                LibInput::mouse_event_abs(event_handle)
+            }
+            libinput_event_type::LIBINPUT_EVENT_POINTER_BUTTON => {
+                LibInput::mouse_button_event(event_handle)
+            },
             _ => {
-                println!("Event type implemented.");
+                println!("Event type unimplemented.");
                 Event::None
             },
         };
