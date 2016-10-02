@@ -1,12 +1,14 @@
-/// User needs to be part of input droup to run this program as non-root.
+/// User needs to be part of input group to run this program as non-root.
 extern crate libinput_sys;
 extern crate libc;
+
+pub mod events;
+use events::{Device, Event};
 
 use ::libinput_sys::*;
 use ::std::os::unix::io::FromRawFd;
 use ::std::os::raw::{c_char, c_int, c_void};
 use ::std::ffi::CString;
-use ::std::ffi::CStr;
 use ::std::fs::File;
 
 unsafe extern "C" fn open_restricted(path: *const c_char, flags: c_int, user_data: *mut c_void) -> c_int {
@@ -21,14 +23,6 @@ unsafe extern "C" fn open_restricted(path: *const c_char, flags: c_int, user_dat
 unsafe extern "C" fn close_restricted(fd: c_int, user_data: *mut c_void) {
     let f = unsafe { File::from_raw_fd(fd) };
     // File is closed when dropped.
-}
-
-// Returns an allocated String. Note that the underlying C buffer may be
-// deallocated before String
-unsafe fn cbuf_to_str(buf: *const c_char) -> String {
-    let u8_buf = CStr::from_ptr(buf).to_bytes();
-    // to_owned() allocates the buffer.
-    std::str::from_utf8(u8_buf).unwrap().to_owned()
 }
 
 fn default_options() -> tools_context {
@@ -64,7 +58,6 @@ fn default_options() -> tools_context {
 pub struct LibInput {
     lib_handle: *mut libinput,
     interface: libinput_interface,
-    pollfd: ::libc::pollfd
 }
 
 impl LibInput {
@@ -97,165 +90,117 @@ impl LibInput {
             return Err("Failed to assign seat");
         }
 
-        // Create default pollfd
-        let pollfds = ::libc::pollfd {
-            fd: unsafe { libinput_get_fd(lib_handle) },
-            events: ::libc::POLLIN,
-            revents: 0,
-        };
-
-        println!("{:?}", pollfds.fd);
+        unsafe { udev_unref(udev) };
 
         Ok(LibInput {
             lib_handle: lib_handle,
             interface: interface,
-            pollfd: pollfds
         })
     }
 
-    /*
-    pub fn get_fd(&self) -> File {
-        let file;
-        unsafe {
-            let ret = libinput_get_fd(self.lib_handle);
-            file = File::from_raw_fd(ret);
-        }
-        file
-    }
-    */
-
-    pub fn poll(&mut self) -> Option<&'static str>{
-        println!("Polling...");
-        let ret = unsafe { ::libc::poll((&mut ((*self).pollfd)) as *mut _, 1, -1) };
-        println!("Polled.");
-        if ret <= -1 {
-            return Some("Failed to poll.");
-        }
-
-        None
-    }
-
-    pub fn get_event(&self) -> Option<LibInputEvent> {
-        unsafe { libinput_dispatch((*self).lib_handle as *mut _) };
-        let event = unsafe { libinput_get_event((*self).lib_handle as *mut _) };
-        if event.is_null() {
-            None
-        } else {
-            Some(LibInputEvent::new_from(event))
-        }
-    }
-
-    /*
-    pub fn into_iter(self) -> EventIterator {
+    pub fn events(&mut self) -> EventIterator {
         EventIterator::new(self)
     }
-    */
+
+    /// Helper functions for creating Events
+    fn create_keyboard_event(event_handle: *mut libinput_event) -> Event {
+        // This function is simply a type  cast in C
+        let key_event = unsafe { libinput_event_get_keyboard_event(event_handle) };
+	    let key_state = unsafe { libinput_event_keyboard_get_key_state(key_event) };
+	    let key = unsafe { libinput_event_keyboard_get_key(key_event) };
+
+        let state = match key_state {
+            libinput_key_state::LIBINPUT_KEY_STATE_PRESSED => events::State::Pressed,
+            libinput_key_state::LIBINPUT_KEY_STATE_RELEASED => events::State::Released,
+        };
+
+        Event::KeyboardInput(state, key)
+    }
 }
 
 impl Drop for LibInput {
     fn drop(&mut self) {
         // Return value ignored here.
+        // This segfaults after polling for events.
         unsafe { libinput_unref(self.lib_handle); }
     }
 }
 
-pub struct LibInputEvent {
-    handle: *mut libinput_event,
-}
-
-impl LibInputEvent {
-    pub fn new_from(event: *mut libinput_event) -> LibInputEvent {
-        LibInputEvent {
-            handle: event,
-        }
-    }
-
-    fn get_dev(&self) -> *mut libinput_device {
-        unsafe { libinput_event_get_device((*self).handle) }
-    }
-
-    fn get_name(&self) -> String {
-        unsafe { cbuf_to_str(libinput_device_get_sysname(self.get_dev())) }
-    }
-
-    fn get_type(&self) -> libinput_event_type {
-        unsafe { libinput_event_get_type((*self).handle) }
-    }
-
-    pub fn print_header(&self) {
-        println!("{}", self.get_name());
-    }
-
-    pub fn print(&self) {
-        match self.get_type() {
-            libinput_event_type::LIBINPUT_EVENT_NONE => unsafe { abort() },
-            libinput_event_type::LIBINPUT_EVENT_DEVICE_ADDED => println!("Add device"),
-            libinput_event_type::LIBINPUT_EVENT_DEVICE_REMOVED => println!("Remove device"),
-            libinput_event_type::LIBINPUT_EVENT_KEYBOARD_KEY => println!("Keyboard key"),
-            libinput_event_type::LIBINPUT_EVENT_POINTER_MOTION => println!("Pointer motion"),
-            libinput_event_type::LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => println!("Pointer motion absolute"),
-            libinput_event_type::LIBINPUT_EVENT_POINTER_BUTTON => println!("Pointer button"),
-            libinput_event_type::LIBINPUT_EVENT_POINTER_AXIS => println!("Pointer axis"),
-            _ => println!("Not implemented."),
-        };
-    }
-}
-
-impl Drop for LibInputEvent {
-    fn drop(&mut self) {
-        unsafe { libinput_event_destroy((*self).handle) };
-    }
-}
-
-// Iterator blocks until next event.
-/*
-pub struct EventIterator {
-    handle: LibInput,
-    curr: *mut libinput_event,
+/// An iterator over libinput events.
+/// next() blocks until next input.
+pub struct EventIterator<'a> {
+    handle: &'a mut LibInput,
     pollfd: ::libc::pollfd,
 }
 
-impl EventIterator {
-    pub fn new(input: LibInput) -> EventIterator {
+impl<'a> EventIterator<'a> {
+    pub fn new(input: &mut LibInput) -> EventIterator {
+        unsafe { libinput_get_fd(input.lib_handle) };
         let pollfd = ::libc::pollfd {
-            fd: unsafe { libinput_get_fd(input.lib_handle) },
+            fd: 3,
             events: ::libc::POLLIN,
             revents: 0,
         };
 
-        let ret = unsafe { ::libc::poll((&mut ((*self).pollfd)) as *mut _, 1, -1) };
-        if ret <= -1 {
-            return None;
-        }
-
-        unsafe { libinput_dispatch((*self).handle.lib_handle as *mut _) };
         EventIterator {
             handle: input,
-            curr: unsafe { libinput_get_event((*self).handle.lib_handle as *mut _) },
-            pollfd: pollfd
+            pollfd: pollfd,
         }
+    }
+
+    fn event_from(event_handle: *mut libinput_event) -> Event {
+        let event_type = unsafe { libinput_event_get_type(event_handle) };
+        let event = match event_type{
+            libinput_event_type::LIBINPUT_EVENT_NONE => {
+                unsafe { abort() };
+                Event::None
+            },
+            libinput_event_type::LIBINPUT_EVENT_DEVICE_ADDED => {
+                Event::DeviceAdd(Device::from(event_handle))
+            },
+            libinput_event_type::LIBINPUT_EVENT_DEVICE_REMOVED => {
+                Event::DeviceRemove(Device::from(event_handle))
+            },
+            libinput_event_type::LIBINPUT_EVENT_KEYBOARD_KEY => {
+                LibInput::create_keyboard_event(event_handle)
+            },
+            libinput_event_type::LIBINPUT_EVENT_POINTER_MOTION => { Event::None },
+            libinput_event_type::LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => { Event::None },
+            libinput_event_type::LIBINPUT_EVENT_POINTER_BUTTON => { Event::None },
+            libinput_event_type::LIBINPUT_EVENT_POINTER_AXIS => { Event::None },
+            _ => {
+                println!("Event type implemented.");
+                Event::None
+            },
+        };
+
+        unsafe { libinput_event_destroy(event_handle) };
+
+        event
     }
 }
 
-impl Iterator for EventIterator {
-    type Item = LibInputEvent;
-    fn next(&mut self) -> Option<LibInputEvent> {
-        if self.curr.is_null() {
+impl<'a> Iterator for EventIterator<'a> {
+    type Item = Event;
+    fn next(&mut self) -> Option<Event> {
+        unsafe { libinput_dispatch((*self).handle.lib_handle) };
+        let event = unsafe { libinput_get_event((*self).handle.lib_handle) };
+
+        // No events left, poll file descriptor for more events.
+        if event.is_null() {
             let ret = unsafe { ::libc::poll((&mut ((*self).pollfd)) as *mut _, 1, -1) };
             if ret <= -1 {
                 return None;
             }
-            unsafe { libinput_dispatch((*self).handle.lib_handle as *mut _) };
-            let event = unsafe { libinput_get_event((*self).handle.lib_handle as *mut _) };
-            self.curr = event;
-            return Some(LibInputEvent::new_from(event));
+            return self.next();
         }
 
-        unsafe { libinput_dispatch((*self).handle.lib_handle as *mut _) };
-        let next = unsafe { libinput_get_event((*self).handle.lib_handle as *mut _) };
+        // event_from free's the handle.
+        let result = EventIterator::event_from(event);
+
+        Some(result)
     }
 }
-*/
 
 #[derive(Copy, Clone)]
 #[repr(u32)]
