@@ -1,3 +1,7 @@
+#![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
+
 /// User needs to be part of input group to run this program as non-root.
 extern crate libinput_sys;
 extern crate libc;
@@ -6,26 +10,25 @@ pub mod events;
 use events::{Device, Event};
 
 use ::libinput_sys::*;
-use ::std::os::unix::io::FromRawFd;
 use ::std::os::raw::{c_char, c_int, c_void};
 use ::std::ffi::CString;
-use ::std::fs::File;
 
 const screen_width: u32 = 100;
 const screen_height: u32 = 100;
 
+#[allow(unused_variable)]
 unsafe extern "C" fn open_restricted(path: *const c_char, flags: c_int, user_data: *mut c_void) -> c_int {
     // We avoid creating a Rust File because that requires abiding by Rust lifetimes.
-    let fd = unsafe { ::libc::open(path, flags) };
+    let fd = ::libc::open(path, flags);
     if fd < 0 {
         println!("open_restricted failed.");
     }
     fd
 }
 
+#[allow(unused_variable)]
 unsafe extern "C" fn close_restricted(fd: c_int, user_data: *mut c_void) {
-    let f = unsafe { File::from_raw_fd(fd) };
-    // File is closed when dropped.
+    libc::close(fd);
 }
 
 static interface: libinput_interface = libinput_interface {
@@ -33,6 +36,7 @@ static interface: libinput_interface = libinput_interface {
     close_restricted: Some(close_restricted),
 };
 
+/// Creates a tools_context which is used with FFI libinput
 fn default_options() -> tools_context {
     let seat_cstr = CString::new("seat0").unwrap();
     let default_options = tools_options {
@@ -83,12 +87,15 @@ impl LibInput {
         };
 
         if lib_handle.is_null() {
+            unsafe { udev_unref(udev) };
             return Err("Failed to initialize context with udev");
         }
 
         let ret = unsafe { libinput_udev_assign_seat(lib_handle, (&tools_context).options.seat) };
 
         if ret > 0 {
+            unsafe { udev_unref(udev) };
+            unsafe { libinput_unref(lib_handle) };
             return Err("Failed to assign seat");
         }
 
@@ -163,9 +170,8 @@ pub struct EventIterator<'a> {
 
 impl<'a> EventIterator<'a> {
     pub fn new(input: &mut LibInput) -> EventIterator {
-        unsafe { libinput_get_fd(input.lib_handle) };
         let pollfd = ::libc::pollfd {
-            fd: 3,
+            fd: unsafe { libinput_get_fd(input.lib_handle) },
             events: ::libc::POLLIN,
             revents: 0,
         };
@@ -221,7 +227,9 @@ impl<'a> Iterator for EventIterator<'a> {
 
         // No events left, poll file descriptor for more events.
         if event.is_null() {
+            println!("Polling");
             let ret = unsafe { ::libc::poll((&mut ((*self).pollfd)) as *mut _, 1, -1) };
+            println!("Done Polling");
             if ret <= -1 {
                 return None;
             }
@@ -269,11 +277,4 @@ pub struct tools_options {
 pub struct tools_context {
     pub options: tools_options,
     pub user_data: *mut c_void,
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-    }
 }
