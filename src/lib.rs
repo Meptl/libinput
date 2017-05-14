@@ -16,7 +16,6 @@ use ::std::ffi::CString;
 const screen_width: u32 = 100;
 const screen_height: u32 = 100;
 
-#[allow(unused_variable)]
 unsafe extern "C" fn open_restricted(path: *const c_char, flags: c_int, user_data: *mut c_void) -> c_int {
     // We avoid creating a Rust File because that requires abiding by Rust lifetimes.
     let fd = ::libc::open(path, flags);
@@ -26,7 +25,6 @@ unsafe extern "C" fn open_restricted(path: *const c_char, flags: c_int, user_dat
     fd
 }
 
-#[allow(unused_variable)]
 unsafe extern "C" fn close_restricted(fd: c_int, user_data: *mut c_void) {
     libc::close(fd);
 }
@@ -39,10 +37,12 @@ static interface: libinput_interface = libinput_interface {
 /// Creates a tools_context which is used with FFI libinput
 fn default_options() -> tools_context {
     let seat_cstr = CString::new("seat0").unwrap();
+    let seat_ptr = seat_cstr.as_ptr();
+    std::mem::forget(seat_cstr); // Prevent Rust from free'ing the CString
     let default_options = tools_options {
         backend: tools_backend::BACKEND_UDEV,
         device: std::ptr::null(),
-        seat: seat_cstr.as_ptr(),
+        seat: seat_ptr,
         grab: 0,
 
         verbose: 0,
@@ -227,9 +227,7 @@ impl<'a> Iterator for EventIterator<'a> {
 
         // No events left, poll file descriptor for more events.
         if event.is_null() {
-            println!("Polling");
             let ret = unsafe { ::libc::poll((&mut ((*self).pollfd)) as *mut _, 1, -1) };
-            println!("Done Polling");
             if ret <= -1 {
                 return None;
             }
