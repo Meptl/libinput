@@ -1,20 +1,21 @@
 extern crate libinput;
 
-use libinput::events::Event;
+use libinput::events::{Event, EventType};
 
 fn main() {
     let mut input = libinput::LibInput::new_from_udev().unwrap();
     for e in input.events() {
-        match e {
-            Event::DeviceAdd(dev) => println!("Added {} {} {}", dev.name(), dev.physical_seat(), dev.logical_seat()),
-            Event::DeviceRemove(dev) => println!("Removed {} {} {}", dev.name(), dev.physical_seat(), dev.logical_seat()),
-            Event::KeyboardInput(state, key) => {
+        let dev = e.device();
+        print!("{} {} {} ", dev.name(), dev.physical_seat(), dev.logical_seat());
+        match e.event_type() {
+            EventType::KeyboardInput(state, key) => {
                 if key == 1 { // Escape key
                     break;
                 }
-                println!("Keypress {}", key)
+                print!("Keypress {} ", key)
             },
             _ => {},
-        }
+        };
+        println!("{}", e.time());
     }
 }

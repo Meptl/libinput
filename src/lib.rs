@@ -39,6 +39,7 @@ fn default_options() -> tools_context {
     let seat_cstr = CString::new("seat0").unwrap();
     let seat_ptr = seat_cstr.as_ptr();
     std::mem::forget(seat_cstr); // Prevent Rust from free'ing the CString
+
     let default_options = tools_options {
         backend: tools_backend::BACKEND_UDEV,
         device: std::ptr::null(),
@@ -107,50 +108,6 @@ impl LibInput {
     pub fn events(&mut self) -> EventIterator {
         EventIterator::new(self)
     }
-
-    fn key_event(event_handle: *mut libinput_event) -> Event {
-        let key_event = unsafe { libinput_event_get_keyboard_event(event_handle) };
-        let key = unsafe { libinput_event_keyboard_get_key(key_event) };
-        let key_state = {
-            let k = unsafe { libinput_event_keyboard_get_key_state(key_event) };
-            match k {
-                libinput_key_state::LIBINPUT_KEY_STATE_PRESSED => events::State::Pressed,
-                libinput_key_state::LIBINPUT_KEY_STATE_RELEASED => events::State::Released,
-            }
-        };
-
-        Event::KeyboardInput(key_state, key)
-    }
-
-    fn mouse_event(event_handle: *mut libinput_event) -> Event {
-        let mouse_event = unsafe { libinput_event_get_pointer_event(event_handle) };
-        let x = unsafe { libinput_event_pointer_get_dx(mouse_event) };
-        let y = unsafe { libinput_event_pointer_get_dy(mouse_event) };
-        Event::MouseMove(x, y)
-    }
-
-    fn mouse_event_abs(event_handle: *mut libinput_event) -> Event {
-        let mouse_event = unsafe { libinput_event_get_pointer_event(event_handle) };
-        let x = unsafe { libinput_event_pointer_get_absolute_x_transformed(
-                            mouse_event, screen_width) };
-        let y = unsafe { libinput_event_pointer_get_absolute_y_transformed(
-                            mouse_event, screen_height) };
-        Event::MouseMoveAbsolute(x, y)
-    }
-
-    fn mouse_button_event(event_handle: *mut libinput_event) -> Event {
-        let mouse_event = unsafe { libinput_event_get_pointer_event(event_handle) };
-        let button = unsafe { libinput_event_pointer_get_button(mouse_event) };
-        let button_state = {
-            let b = unsafe { libinput_event_pointer_get_button_state(mouse_event) };
-            match b {
-                libinput_button_state::LIBINPUT_BUTTON_STATE_PRESSED => events::State::Pressed,
-                libinput_button_state::LIBINPUT_BUTTON_STATE_RELEASED => events::State::Released,
-            }
-        };
-
-        Event::MouseButton(button_state, button)
-    }
 }
 
 impl Drop for LibInput {
@@ -182,41 +139,6 @@ impl<'a> EventIterator<'a> {
         }
     }
 
-    fn event_from(event_handle: *mut libinput_event) -> Event {
-        let event_type = unsafe { libinput_event_get_type(event_handle) };
-        let event = match event_type{
-            libinput_event_type::LIBINPUT_EVENT_NONE => {
-                unsafe { abort() };
-                Event::None
-            },
-            libinput_event_type::LIBINPUT_EVENT_DEVICE_ADDED => {
-                Event::DeviceAdd(Device::from(event_handle))
-            },
-            libinput_event_type::LIBINPUT_EVENT_DEVICE_REMOVED => {
-                Event::DeviceRemove(Device::from(event_handle))
-            },
-            libinput_event_type::LIBINPUT_EVENT_KEYBOARD_KEY => {
-                LibInput::key_event(event_handle)
-            },
-            libinput_event_type::LIBINPUT_EVENT_POINTER_MOTION => {
-                LibInput::mouse_event(event_handle)
-            },
-            libinput_event_type::LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE => {
-                LibInput::mouse_event_abs(event_handle)
-            }
-            libinput_event_type::LIBINPUT_EVENT_POINTER_BUTTON => {
-                LibInput::mouse_button_event(event_handle)
-            },
-            _ => {
-                println!("Event type unimplemented.");
-                Event::None
-            },
-        };
-
-        unsafe { libinput_event_destroy(event_handle) };
-
-        event
-    }
 }
 
 impl<'a> Iterator for EventIterator<'a> {
@@ -234,15 +156,13 @@ impl<'a> Iterator for EventIterator<'a> {
             return self.next();
         }
 
-        // event_from free's the handle.
-        let result = EventIterator::event_from(event);
-
-        Some(result)
+        // Event::from frees event_lib (also takes ownership)
+        Some(Event::from(event))
     }
 }
 
-#[derive(Copy, Clone)]
 #[repr(u32)]
+#[derive(Copy, Clone)]
 #[derive(Debug)]
 pub enum tools_backend { BACKEND_DEVICE = 0, BACKEND_UDEV = 1, }
 
