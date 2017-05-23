@@ -24,27 +24,37 @@ pub enum Source {
     WheelTilt,
 }
 
+pub struct Button {
+    state: State,
+    key: u32
+}
+
+pub struct Motion {
+    x: f64,
+    y: f64
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum EventType {
     None,
     DeviceAdd,
     DeviceRemove,
-    KeyboardInput(State, u32),
-    MouseMove(f64, f64),
-    MouseMoveAbsolute(f64, f64),
-    MouseButton(State, u32),
+    Keyboard(Button),
+    MouseMove(Motion),
+    MouseMoveAbsolute(Motion)
+    MouseButton(Button)
     MouseAxis(Source, Option<f64>, Option<f64>),
-    TouchpadDown,
-    TouchpadMotion,
-    TouchpadUp,
-    TouchpadCancel,
-    TouchpadFrame,
-    GestureSwipeBegin,
-    GestureSwipeUpdate,
-    GestureSwipeEnd,
-    GesturePinchBegin,
-    GesturePinchUpdate,
-    GesturePinchEnd,
+    TouchDown(f64, f64),
+    TouchMotion(f64, f64),
+    TouchUp,
+    TouchCancel,
+    TouchFrame,
+    GestureSwipeBegin(u8),
+    GestureSwipeUpdate(u8, f64, f64, f64, f64),
+    GestureSwipeEnd(u8, bool),
+    GesturePinchBegin(u8),
+    GesturePinchUpdate(u8, f64, f64, f64, f64, f64, f64),
+    GesturePinchEnd(u8, bool),
     TabletAxis,
     TabletProximity,
     TabletTip,
@@ -53,7 +63,6 @@ pub enum EventType {
     TabletpadRing,
     TabletpadStrip,
 }
-
 pub struct Event {
     lib_handle: *mut libinput_event,
     device: Device,
@@ -177,6 +186,132 @@ impl From<*mut libinput_event> for Event {
 
                 EventType::MouseAxis(source_type, vert, hori)
             },
+            libinput_event_type::LIBINPUT_TOUCH_DOWN => {
+                unsafe {
+                    let touch_event = libinput_event_get_touch_event(event_handle);
+                    //let x = libinput_event_touch_get_x_transformed(t, screen_width);
+                    //let y = libinput_event_touch_get_y_transformed(t, screen_height);
+                    let x = libinput_event_touch_get_x(touch_event);
+                    let y = libinput_event_touch_get_y(touch_event);
+
+                    EventType::TouchDown(x, y)
+                }
+            },
+            libinput_event_type::LIBINPUT_TOUCH_MOTION => {
+                unsafe {
+                    let touch_event = libinput_event_get_touch_event(event_handle);
+                    let x = libinput_event_touch_get_x(touch_event);
+                    let y = libinput_event_touch_get_y(touch_event);
+
+                    EventType::TouchMotion(x, y)
+                }
+            },
+            libinput_event_type::LIBINPUT_TOUCH_UP => EventType::TouchUp,
+            libinput_event_type::LIBINPUT_TOUCH_CANCEL => EventType::TouchCancel,
+            libinput_event_type::LIBINPUT_TOUCH_FRAME => EventType::TouchFrame,
+	        libinput_event_type::LIBINPUT_EVENT_GESTURE_SWIPE_BEGIN => {
+                let gesture_event = unsafe { libinput_event_get_gesture_event(event_handle) };
+                let fingers = unsafe { libinput_event_gesture_get_finger_count(gesture_event) };
+                EventType::GestureSwipeBegin(fingers)
+            },
+	        libinput_event_type::LIBINPUT_EVENT_GESTURE_SWIPE_UPDATE => {
+                unsafe {
+                    let gesture_event = libinput_event_get_gesture_event(event_handle);
+                    let fingers = unsafe { libinput_event_gesture_get_finger_count(gesture_event) };
+                    let dx = libinput_event_gesture_get_dx(gesture_event);
+                    let dy = libinput_event_gesture_get_dy(gesture_event);
+                    let dx_unaccel = libinput_event_gesture_get_dx_unaccelerated(gesture_event);
+                    let dy_unaccel = libinput_event_gesture_get_dy_unaccelerated(gesture_event);
+
+                    EventType::GestureSwipeUpdate(fingers, dx, dy, dx_unaccel, dy_unaccel)
+                }
+            },
+	        libinput_event_type::LIBINPUT_EVENT_GESTURE_SWIPE_END => {
+                let gesture_event = unsafe { libinput_event_get_gesture_event(event_handle) };
+                let fingers = unsafe { libinput_event_gesture_get_finger_count(gesture_event) };
+                let cancelled = unsafe { libinput_event_gesture_get_cancelled(gesture_event) };
+                EventType::GestureSwipeEnd(fingers, cancelled)
+            },
+	        libinput_event_type::LIBINPUT_EVENT_GESTURE_PINCH_BEGIN => {
+                let gesture_event = unsafe { libinput_event_get_gesture_event(event_handle) };
+                let fingers = unsafe { libinput_event_gesture_get_finger_count(gesture_event) };
+                EventType::GesturePinchEnd(fingers)
+            },
+	        libinput_event_type::LIBINPUT_EVENT_GESTURE_PINCH_UPDATE => {
+                unsafe {
+                    let gesture_event = libinput_event_get_gesture_event(event_handle);
+                    let fingers = unsafe { libinput_event_gesture_get_finger_count(gesture_event) };
+                    let dx = libinput_event_gesture_get_dx(gesture_event);
+                    let dy = libinput_event_gesture_get_dy(gesture_event);
+                    let dx_unaccel = libinput_event_gesture_get_dx_unaccelerated(gesture_event);
+                    let dy_unaccel = libinput_event_gesture_get_dy_unaccelerated(gesture_event);
+                    let scale = libinput_event_gesture_get_scale(gesture_event);
+                    let angle = libinput_event_gesture_get_angle_delta(gesture_event);
+
+                    EventType::GestureSwipeUpdate(fingers, dx, dy, dx_unaccel, dy_unaccel, scale, angle)
+                }
+            },
+            fn tablet_event_axes(libinput_event_tablet_tool) {
+                unsafe {
+                    let tool = libinput_event_tablet_tool_get_tool(tablet_event);
+                    let x = libinput_event_tablet_tool_get_x(t);
+                    let y = libinput_event_tablet_tool_get_y(t);
+
+                    if libinput_tablet_tool_has_tilt(tool) {
+                        x = libinput_event_tablet_tool_get_tilt_x(t);
+                        y = libinput_event_tablet_tool_get_tilt_y(t);
+                        printq("\ttilt: %.2f%s/%.2f%s",
+                               x, changed_sym(t, tilt_x),
+                               y, changed_sym(t, tilt_y));
+                    }
+
+                    if (libinput_tablet_tool_has_distance(tool) ||
+                        libinput_tablet_tool_has_pressure(tool)) {
+                        dist = libinput_event_tablet_tool_get_distance(t);
+                        pressure = libinput_event_tablet_tool_get_pressure(t);
+                        if (dist)
+                            printq("\tdistance: %.2f%s",
+                                   dist, changed_sym(t, distance));
+                        else
+                            printq("\tpressure: %.2f%s",
+                                   pressure, changed_sym(t, pressure));
+                    }
+
+                    if (libinput_tablet_tool_has_rotation(tool)) {
+                        rotation = libinput_event_tablet_tool_get_rotation(t);
+                        printq("\trotation: %.2f%s",
+                               rotation, changed_sym(t, rotation));
+                    }
+
+                    if (libinput_tablet_tool_has_slider(tool)) {
+                        slider = libinput_event_tablet_tool_get_slider_position(t);
+                        printq("\tslider: %.2f%s",
+                               slider, changed_sym(t, slider));
+                    }
+
+                    if (libinput_tablet_tool_has_wheel(tool)) {
+                        wheel = libinput_event_tablet_tool_get_wheel_delta(t);
+                        delta = libinput_event_tablet_tool_get_wheel_delta_discrete(t);
+                        printq("\twheel: %.2f%s (%d)",
+                               wheel, changed_sym(t, wheel),
+                               (int)delta);
+                    }
+                }
+            }
+	        libinput_event_type::LIBINPUT_EVENT_GESTURE_PINCH_END => {
+                let gesture_event = unsafe { libinput_event_get_gesture_event(event_handle) };
+                let fingers = unsafe { libinput_event_gesture_get_finger_count(gesture_event) };
+                let cancelled = unsafe { libinput_event_gesture_get_cancelled(gesture_event) };
+                EventType::GesturePinchEnd(fingers, cancelled)
+            },
+	        libinput_event_type::LIBINPUT_EVENT_TABLET_TOOL_AXIS => EventType::Gesture,
+	        libinput_event_type::LIBINPUT_EVENT_TABLET_TOOL_PROXIMITY => EventType::Gesture,
+	        libinput_event_type::LIBINPUT_EVENT_TABLET_TOOL_TIP => EventType::Gesture,
+	        libinput_event_type::LIBINPUT_EVENT_TABLET_TOOL_BUTTON => EventType::Gesture,
+	        libinput_event_type::LIBINPUT_EVENT_TABLET_PAD_BUTTON => EventType::Gesture,
+	        libinput_event_type::LIBINPUT_EVENT_TABLET_PAD_RING => EventType::Gesture,
+	        libinput_event_type::LIBINPUT_EVENT_TABLET_PAD_STRIP => EventType::Gesture,
+	        libinput_event_type::LIBINPUT_EVENT_SWITCH_TOGGLE => EventType::Gesture,
             _ => {
                 println!("Event type unimplemented.");
                 EventType::None
